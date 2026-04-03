@@ -1,6 +1,5 @@
 import torch
 from typing import Optional
-# torch.set_printoptions(15)
 
 
 @torch.no_grad()
@@ -26,18 +25,6 @@ def a_quant_per_token(
         assert num_groups * group_size == h_dim, \
             f"The input tensor's last dimension {x_fp.shape[-1]} is not divisible by group_size {group_size}"
     x_fp_new = x_fp.view(batch, seq_len, num_groups, group_size)
-
-    # ############### INT8 Quantization ###############
-    # qmax = 127
-    # rmax = torch.amax(x_fp_new.abs(), dim=-1, keepdim=True)
-    # rmax = rmax.clamp(min=1e-5)
-    # scale = (rmax / qmax).clamp_(min=1e-6)
-
-    # x_q  = torch.clamp(torch.round(x_fp_new / scale), min=-qmax, max=qmax)
-    # x_dq = x_q * scale
-    # x_dq = x_dq.view(batch, seq_len, h_dim)
-
-    # return x_dq
 
     ############### FP8-E4M3 Quantization ###############
     qmax = 448
@@ -69,37 +56,6 @@ def q_quant_per_head(
     """
     if q_bits >= 16:
         return x_fp
-    
-    # batch, num_head, seq_len, h_dim = x_fp.shape
-    # x_fp_new = x_fp.transpose(1, 2).view(batch, seq_len, -1)
-    # x_fp_new = x_fp
-
-    # ############### INT8 Quantization ###############
-    # qmax = 127
-    # rmax = torch.amax(x_fp_new.abs(), dim=-1, keepdim=True)
-    # rmax = rmax.clamp(min=1e-5)
-    # scale = (rmax / qmax).clamp_(min=1e-6)
-
-    # x_q  = torch.clamp(torch.round(x_fp_new / scale), min=-qmax, max=qmax)
-    # x_dq = x_q * scale
-
-    # x_dq = x_dq.view(batch, seq_len, num_head, h_dim).transpose(1, 2)
-
-    # return x_dq
-
-    ############### FP8-E3M4 Quantization ###############
-    # qmax = 30
-    # rmax = torch.amax(x_fp_new.abs(), dim=-1, keepdim=True)
-    # scale = rmax / qmax
-    # scale = scale.clamp_(min=1e-6)
-    # x_scaled = (x_fp_new / scale).abs()
-
-    # x_dq_sign = torch.sign(x_fp_new)
-    # x_dq_exp  = (x_scaled + (x_scaled == 0).type(x_scaled.dtype)).log2().floor().clamp_(min=-2)
-    # x_dq_man  = torch.round(x_scaled / 2**x_dq_exp * 2**4) / 2**4
-
-    # x_dq = x_dq_sign * 2**x_dq_exp * x_dq_man * scale
-    # return x_dq
 
     ############### FP8-E4M3 Quantization ###############
     qmax = 448
@@ -113,8 +69,6 @@ def q_quant_per_head(
     x_dq_man  = torch.round(x_scaled / 2**x_dq_exp * 2**3) / 2**3
 
     x_dq = x_dq_sign * 2**x_dq_exp * x_dq_man * scale
-
-    # x_dq = x_dq.view(batch, seq_len, num_head, h_dim).transpose(1, 2)
 
     return x_dq
 
@@ -177,7 +131,6 @@ def k_quant_per_token(
         if apply_k_bias:
             x_dq = x_dq + k_bias
     
-    # print(f'Key Quant Error Pre-RoPE: {(x_dq - x_fp).to(torch.float32).pow(2).mean() * 1e3}')
     return x_dq
 
 
@@ -215,9 +168,8 @@ def k_quant_per_channel(
     zeropoint = -rmin
     q_tensor = torch.clamp(torch.round((x_fp_new + zeropoint) / scale_fp), min=qmin, max=qmax)
     x_dq = (q_tensor * scale_fp) - zeropoint
-
     x_dq = x_dq.view(batch, seq_len, num_head, h_dim).permute(0, 2, 1, 3)
-    #print(f'Quant Error: {(x_dq - x_fp).pow(2).mean()}')
+    
     return x_dq
 
 
@@ -278,23 +230,7 @@ def p_quant_per_block(
 
     if p_bits >= 16:
         return x_fp
-    
-    # if p_bits == 12:
-    #     x_fp_tmp = x_fp.view(torch.int16)
-    #     x_dq     = x_fp_tmp.bitwise_and(65532)
-
-    #     #NOTE (Yuzong): This Boolean masking operation is to simualte the rounding of LSBs when quantizing the original FP16 value,
-    #     #               which mimics the "round-to-nearest-even" of floating-point arithmetic.
-    #     #               However, we found that this rounding doesn't impact the accuracy compared to directly dropping LSBs, 
-    #     #               but will significantly slow down the GPU. Hence, we comment out this operation for faster simualtion speed.
-    #     # x_fp_lsb = x_fp_tmp.bitwise_and(3)
-    #     # roundup_mask = x_fp_lsb.gt(1)
-    #     # x_dq[roundup_mask] = x_dq[roundup_mask] + 4
-
-    #     x_dq = x_dq.view(torch.float16)
-    #     return x_dq
-    
-    if p_bits == 8:
+    elif p_bits == 8:
         x_fp_tmp = x_fp.view(torch.int16)
         x_dq     = x_fp_tmp.bitwise_and(65472) 
         
@@ -308,16 +244,9 @@ def p_quant_per_block(
 
         x_dq = x_dq.view(torch.float16)
         return x_dq
-    
-    # rmax = torch.amax(x_fp.abs(), dim=-1, keepdim=True)
-    # qmax = 2**(p_bits-1) - 1
-    # qmin = -qmax  
-    # scale_fp = rmax / qmax
-    # scale_fp = scale_fp.clamp_(min=1e-6)
-    # x_q = torch.clamp(torch.round(x_fp / scale_fp), min=qmin, max=qmax)
-    # x_dq = x_q * scale_fp
+    else:
+        raise ValueError(f'Unsupported attention-score precision: {p_bits}')
 
-    return x_dq
 
 
 def a_quant_function(
