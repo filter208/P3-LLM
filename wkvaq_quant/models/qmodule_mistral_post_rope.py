@@ -14,7 +14,75 @@ import logging, warnings
 logger = logging.getLogger(__name__)
 
 _CONFIG_FOR_DOC = "MistralConfig"
+def apply_rotary_pos_emb_post_quant(q, k, cos_q, sin_q, cos_k, sin_k, position_ids=None, unsqueeze_dim=1):
+    """Applies Rotary Position Embedding to the query and key tensors.
 
+    Args:
+        q (`torch.Tensor`): The query tensor.
+        k (`torch.Tensor`): The key tensor.
+        cos (`torch.Tensor`): The cosine part of the rotary embedding.
+        sin (`torch.Tensor`): The sine part of the rotary embedding.
+        position_ids (`torch.Tensor`, *optional*):
+            Deprecated and unused.
+        unsqueeze_dim (`int`, *optional*, defaults to 1):
+            The 'unsqueeze_dim' argument specifies the dimension along which to unsqueeze cos[position_ids] and
+            sin[position_ids] so that they can be properly broadcasted to the dimensions of q and k. For example, note
+            that cos[position_ids] and sin[position_ids] have the shape [batch_size, seq_len, head_dim]. Then, if q and
+            k have the shape [batch_size, heads, seq_len, head_dim], then setting unsqueeze_dim=1 makes
+            cos[position_ids] and sin[position_ids] broadcastable to the shapes of q and k. Similarly, if q and k have
+            the shape [batch_size, seq_len, heads, head_dim], then set unsqueeze_dim=2.
+    Returns:
+        `tuple(torch.Tensor)` comprising of the query and key tensors rotated using the Rotary Position Embedding.
+    """
+    cos_q = cos_q.unsqueeze(unsqueeze_dim)
+    sin_q = sin_q.unsqueeze(unsqueeze_dim)
+    cos_k = cos_k.unsqueeze(unsqueeze_dim)
+    sin_k = sin_k.unsqueeze(unsqueeze_dim)
+    q_embed = (q * cos_q) + (rotate_half(q) * sin_q)
+    k_embed = (k * cos_k) + (rotate_half(k) * sin_k)
+    return q_embed, k_embed
+
+
+class MistralRotaryEmbeddingPostQuant(nn.Module):
+    def __init__(self, dim, max_position_embeddings=2048, base=10000, device=None):
+        super().__init__()
+
+        self.dim = dim
+        self.max_position_embeddings = max_position_embeddings
+        self.base = base
+        inv_freq = 1.0 / (self.base ** (torch.arange(0, self.dim, 2, dtype=torch.int64).float().to(device) / self.dim))
+        self.register_buffer("inv_freq", inv_freq, persistent=False)
+
+    @torch.no_grad()
+    # copied from transformers.models.llama.modeling_llama.MistralRotaryEmbedding.forward
+    # TODO(joao): add me back asap :)
+    def forward(self, x, position_ids, position_ids_cache):
+        # x: [bs, num_attention_heads, seq_len, head_size]
+        inv_freq_expanded = self.inv_freq[None, :, None].float().expand(position_ids.shape[0], -1, 1)
+        position_ids_expanded = position_ids[:, None, :].float()
+        # Force float32 since bfloat16 loses precision on long contexts
+        # See https://github.com/huggingface/transformers/pull/29285
+        device_type = x.device.type
+        device_type = device_type if isinstance(device_type, str) and device_type != "mps" else "cpu"
+        with torch.autocast(device_type=device_type, enabled=False):
+            freqs = (inv_freq_expanded.float() @ position_ids_expanded.float()).transpose(1, 2)
+            emb = torch.cat((freqs, freqs), dim=-1)
+            cos_q = emb.cos()
+            sin_q = emb.sin()
+        # x: [bs, num_attention_heads, seq_len, head_size]
+        inv_freq_expanded_cache = self.inv_freq[None, :, None].float().expand(position_ids_cache.shape[0], -1, 1)
+        position_ids_expanded_cache = position_ids_cache[:, None, :].float()
+        # Force float32 since bfloat16 loses precision on long contexts
+        # See https://github.com/huggingface/transformers/pull/29285
+        device_type = x.device.type
+        device_type = device_type if isinstance(device_type, str) and device_type != "mps" else "cpu"
+        with torch.autocast(device_type=device_type, enabled=False):
+            freqs = (inv_freq_expanded_cache.float() @ position_ids_expanded_cache.float()).transpose(1, 2)
+            emb = torch.cat((freqs, freqs), dim=-1)
+            cos_k = emb.cos()
+            sin_k = emb.sin()
+
+        return cos_q.to(dtype=x.dtype), sin_q.to(dtype=x.dtype), cos_k.to(dtype=x.dtype), sin_k.to(dtype=x.dtype)
 
 class QuantMistralAttention(nn.Module):
     """Multi-headed attention from 'Attention Is All You Need' paper"""
@@ -25,7 +93,7 @@ class QuantMistralAttention(nn.Module):
         self.attention_dropout = config.attention_dropout
         self.hidden_size = config.hidden_size
         self.num_heads = config.num_attention_heads
-        self.head_dim = config.head_dim
+        self.head_dim = config.hidden_size // config.num_attention_heads
         self.num_key_value_heads = config.num_key_value_heads
         self.num_key_value_groups = self.num_heads // self.num_key_value_heads
         self.max_position_embeddings = config.max_position_embeddings
@@ -49,7 +117,13 @@ class QuantMistralAttention(nn.Module):
         self.k_proj = nn.Linear(self.hidden_size, self.num_key_value_heads * self.head_dim, bias=False)
         self.v_proj = nn.Linear(self.hidden_size, self.num_key_value_heads * self.head_dim, bias=False)
         self.o_proj = nn.Linear(self.num_heads * self.head_dim, self.hidden_size, bias=False)
+        '''
         self.rotary_emb = MistralRotaryEmbedding(
+            self.head_dim,
+            max_position_embeddings=self.max_position_embeddings,
+            base=self.rope_theta,
+        )'''
+        self.rotary_emb_post_quant = MistralRotaryEmbeddingPostQuant(
             self.head_dim,
             max_position_embeddings=self.max_position_embeddings,
             base=self.rope_theta,
@@ -83,9 +157,25 @@ class QuantMistralAttention(nn.Module):
         kv_seq_len = key_states.shape[-2]
         if past_key_value is not None:
             kv_seq_len += past_key_value[-1]
-        
+        '''
         cos, sin = self.rotary_emb(key_states, position_ids)
         query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin, position_ids)
+        '''
+        cos_q, sin_q, cos_k, sin_k = self.rotary_emb_post_quant(
+            key_states,
+            position_ids,
+            position_ids
+)
+
+        query_states, key_states = apply_rotary_pos_emb_post_quant(
+            query_states,
+            key_states,
+            cos_q,
+            sin_q,
+            cos_k,
+            sin_k,
+            position_ids
+)
 
         #NOTE (Yuzong): quantized self-attention
         if not self.kv_quant_post_attn:

@@ -29,8 +29,15 @@ def eval_ppl(model, tokenizer, args):
     for task_eval in args.datasets:
         if task_eval == "wikitext":
             # https://github.com/IST-DASLab/gptq/blob/2d65066eeb06a5c9ff5184d8cebdf33662c67faf/llama.py#L206
-            testenc = load_dataset("wikitext", "wikitext-2-raw-v1", split="test")
-            testenc = tokenizer("\n\n".join(testenc["text"]), return_tensors="pt")
+            #testenc = load_dataset("wikitext", "wikitext-2-raw-v1", split="test")
+            #testenc = tokenizer("\n\n".join(testenc["text"]), return_tensors="pt")
+            with open("/home/sxy/workspace/datasets/wikitext-2/wiki.test.clean.raw","r",encoding="utf-8"
+            ) as f:
+                text = f.read()
+
+            testenc = tokenizer(text, return_tensors="pt")
+            print("tokens:", testenc.input_ids.shape)
+
             model.seq_len = args.seq_len
             testenc = testenc.input_ids.to(model.device)
             nsamples = testenc.numel() // model.seq_len
@@ -176,6 +183,11 @@ if __name__ == '__main__':
     logger.info("#################### Loading model and tokenizer ... ####################")
     model, tokenizer = load_model_and_tokenizer(model_name, quant_config=quant_config, use_fp16=args.use_fp16)
 
+    print("dtype:", next(model.parameters()).dtype)
+    print("device:", next(model.parameters()).device)
+    print("model type:", type(model))
+    print("========== DEBUG QUANT CONFIG ==========")
+    print(quant_config)
     logger.info("#################### Start running perplexity evaluation ... ####################")
     res = eval_ppl(model, tokenizer, args)
 

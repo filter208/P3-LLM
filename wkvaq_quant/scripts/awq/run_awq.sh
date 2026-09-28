@@ -1,9 +1,10 @@
 #!/bin/bash
 
 
-HOME_DIR="/home/yc2367/llm/P2-LLM/3rdparty/llm-awq"
+HOME_DIR="/home/sxy/workspace/P3-LLM/3rdparty/llm-awq"
 
-model_name_list=("llama-7b" "llama-13b" "llama-2-7b" "llama-2-13b" "llama-3.1-8b" "llama-3.2-3b" "llama-3.1-8b-ins" "llama-3.2-3b-ins" "mistral-7b-v1" "mistral-7b-v3")
+#model_name_list=("llama-7b" "llama-13b" "llama-2-7b" "llama-2-13b" "llama-3.1-8b" "llama-3.2-3b" "llama-3.1-8b-ins" "llama-3.2-3b-ins" "mistral-7b-v1" "mistral-7b-v3")
+model_name_list=("llama-2-7b")
 
 wq_dtype="int"
 w_bit_list=(4)

@@ -290,8 +290,7 @@ def k_quant_function(
     elif kv_quant_method == "KCVT": # key per-channel, value per-token
         k_dq = k_quant_per_channel(
             k_fp, k_bits, k_group_size
-        )       
-
+        )
     return k_dq
 
 

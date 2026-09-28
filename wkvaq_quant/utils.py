@@ -191,6 +191,7 @@ def load_model_and_tokenizer(model_name, quant_config=None, device_map="cuda:0",
     tokenizer = AutoTokenizer.from_pretrained(
         model_path_fp16,
         trust_remote_code=True,
+        use_fast=False,
     )
 
     model.eval() 
