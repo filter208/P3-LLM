@@ -8,6 +8,7 @@ from tqdm import tqdm
 from loguru import logger
 import os
 import json
+import hashlib
 import random
 import warnings
 # Ignore all warnings
@@ -24,18 +25,42 @@ from utils import (
 
     
 @torch.no_grad()
-def eval_ppl(model, tokenizer, args):
+def eval_ppl(model, tokenizer, args,input_fingerprints):
     results = {}
     for task_eval in args.datasets:
         if task_eval == "wikitext":
             # https://github.com/IST-DASLab/gptq/blob/2d65066eeb06a5c9ff5184d8cebdf33662c67faf/llama.py#L206
             #testenc = load_dataset("wikitext", "wikitext-2-raw-v1", split="test")
             #testenc = tokenizer("\n\n".join(testenc["text"]), return_tensors="pt")
-            with open("/home/sxy/workspace/datasets/wikitext-2/wiki.test.clean.raw","r",encoding="utf-8"
+            with open("/data2/model_zoo/datasets/wikitext-2-raw-v1/wikitext-2-raw/wiki.test.raw",encoding="utf-8"
             ) as f:
-                text = f.read()
+                rows = [line if line.strip() else "" for line in f]
+            text = "\n\n".join(rows)
 
             testenc = tokenizer(text, return_tensors="pt")
+            ids = testenc.input_ids[0].tolist()
+            n = len(ids)
+            input_fingerprints[task_eval] = {
+                "construction": "HF rows: preserve nonblank lines; blank -> empty; join with LF LF",
+                "characters": len(text),
+                "text_sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
+                "literal_unk_count": text.count("<unk>"),
+                "tokenizer_path": tokenizer.name_or_path,
+                "tokenizer_class": type(tokenizer).__name__,
+                "use_fast": tokenizer.is_fast,
+                "add_special_tokens": True,
+                "tokens": n,
+                "first_32_token_ids": ids[:32],
+                "seq_len": args.seq_len,
+                "blocks": n // args.seq_len,
+                "discarded_tokens": n % args.seq_len,
+                "effective_label_tokens": (n // args.seq_len) * (args.seq_len - 1),
+                "token_ids_sha256": hashlib.sha256(
+                    json.dumps(ids, separators=(",", ":")).encode("utf-8")
+                ).hexdigest(),
+            }
+            print("Input fingerprint:", json.dumps(input_fingerprints[task_eval]))
+            
             print("tokens:", testenc.input_ids.shape)
 
             model.seq_len = args.seq_len
@@ -189,12 +214,15 @@ if __name__ == '__main__':
     print("========== DEBUG QUANT CONFIG ==========")
     print(quant_config)
     logger.info("#################### Start running perplexity evaluation ... ####################")
-    res = eval_ppl(model, tokenizer, args)
+    input_fingerprints = {}
+    res = eval_ppl(model, tokenizer, args, input_fingerprints)
 
     # Save results to JSON file
     with open(output_file_path, "w") as f:
         for dataset, ppl in res.items():
             logger.info(f"{dataset} PPL: {ppl}")
             f.write(f"{dataset.ljust(10)} PPL: {ppl}\n")
-    
+    with open(os.path.splitext(output_file_path)[0] + ".json", "w", encoding="utf-8") as f:
+        json.dump({"arguments": vars(args), "input_fingerprints": input_fingerprints,
+                   "perplexity": res}, f, indent=2, ensure_ascii=False)
     print(f"Results saved to {output_file_path} \n\n")
